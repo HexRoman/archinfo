@@ -1,10 +1,7 @@
-from past.builtins import long # pylint: disable=redefined-builtin
-from future.utils import iteritems
 import logging
 import struct as _struct
 import platform as _platform
 import re
-import sys
 from archinfo.archerror import ArchError
 
 l = logging.getLogger("archinfo.arch")
@@ -30,11 +27,6 @@ try:
 except ImportError:
     _keystone = None
 
-if sys.version_info[0] >= 3:
-    integer_types = (int,)
-else:
-    integer_types = (int, long)
-
 
 class Endness: # pylint: disable=no-init
     """ Endness specifies the byte order for integer values
@@ -48,7 +40,7 @@ class Endness: # pylint: disable=no-init
     ME = 'Iend_ME'
 
 
-class Register(object):
+class Register:
     """
     A collection of information about a register. Each different architecture
     has its own list of registers, which is the base for all other
@@ -71,11 +63,12 @@ class Register(object):
     :ivar tuple default_value: The offset of the instruction pointer in the register file
     :ivar int, str linux_entry_value: The offset of the instruction pointer in the register file
     :ivar bool concretize_unique: Whether this register should be concretized, if unique, at the end of each block
+    :ivar bool concrete: Whether this register should be considered during the synchronization of the concrete execution of the process
     """
     def __init__(self, name, size, vex_offset=None, vex_name=None, subregisters=None,
                  alias_names=None, general_purpose=False, floating_point=False,
                  vector=False, argument=False, persistent=False, default_value=None,
-                 linux_entry_value=None, concretize_unique=False):
+                 linux_entry_value=None, concretize_unique=False, concrete=True):
         self.name = name
         self.size = size
         self.vex_offset = vex_offset
@@ -90,9 +83,9 @@ class Register(object):
         self.default_value = default_value
         self.linux_entry_value = linux_entry_value
         self.concretize_unique = concretize_unique
+        self.concrete = concrete
 
-
-class Arch(object):
+class Arch:
     """
     A collection of information about a given architecture. This class should be subclasses for each different
     architecture, and then that subclass should be registered with the ``register_arch`` method.
@@ -211,23 +204,25 @@ class Arch(object):
             self.concretize_unique_registers = set(r.vex_offset for r in self.register_list if r.concretize_unique)
 
             # Register offsets
-            self.ip_offset = self.registers['ip'][0]
-            self.sp_offset = self.registers['sp'][0]
-            self.bp_offset = self.registers['bp'][0]
-            self.lr_offset = self.registers.get('lr', (None, None))[0]
+            try:
+                self.ip_offset = self.registers['ip'][0]
+                self.sp_offset = self.registers['sp'][0]
+                self.bp_offset = self.registers['bp'][0]
+                self.lr_offset = self.registers.get('lr', (None, None))[0]
+            except KeyError:
+                pass
 
         # generate register mapping (offset, size): name
         self.register_size_names = {}
-        for k in self.registers:
-            v = self.registers[k]
-
-            # special hacks for X86 and AMD64 - don't translate register names to bp, sp, etc.
-            if self.name in {'X86', 'AMD64'} and k in {'bp', 'sp', 'ip'}:
+        for reg in self.register_list:
+            if reg.vex_offset is None:
                 continue
-
-            if v in self.register_size_names and k not in self.register_names:
-                continue
-            self.register_size_names[v] = k
+            self.register_size_names[(reg.vex_offset, reg.size)] = reg.name
+            for name, off, sz in reg.subregisters:
+                # special hacks for X86 and AMD64 - don't translate register names to bp, sp, etc.
+                if self.name in {'X86', 'AMD64'} and name in {'bp', 'sp', 'ip'}:
+                    continue
+                self.register_size_names[(reg.vex_offset + off, sz)] = name
 
         # Unicorn specific stuff
         if self.uc_mode is not None:
@@ -275,7 +270,7 @@ class Arch(object):
     def get_default_reg_value(self, register):
         if register == 'sp':
             # Convert it to the corresponding register name
-            registers = [r for r, v in iteritems(self.registers) if v[0] == self.sp_offset]
+            registers = [r for r, v in self.registers.items() if v[0] == self.sp_offset]
             if len(registers) > 0:
                 register = registers[0]
             else:
@@ -426,7 +421,7 @@ class Arch(object):
         try:
             return self.dynamic_tag_translation[tag]
         except KeyError:
-            if isinstance(tag, integer_types):
+            if isinstance(tag, int):
                 l.error("Please look up and add dynamic tag type %#x for %s", tag, self.name)
             return tag
 
@@ -434,7 +429,7 @@ class Arch(object):
         try:
             return self.symbol_type_translation[tag]
         except KeyError:
-            if isinstance(tag, integer_types):
+            if isinstance(tag, int):
                 l.error("Please look up and add symbol type %#x for %s", tag, self.name)
             return tag
 
@@ -474,6 +469,39 @@ class Arch(object):
         if pedantic:
             path = sum([[x + 'tls/${ARCH}/', x + 'tls/', x + '${ARCH}/', x] for x in path], [])
         return list(map(subfunc, path))
+
+    def m_addr(self, addr, *args, **kwargs):
+        """
+        Given the address of some code block, convert it to the address where this block
+        is stored in memory. The memory address can also be referred to as the "real" address.
+
+        :param addr:    The address to convert.
+        :return:        The "real" address in memory.
+        :rtype:         int
+        """
+        return addr
+
+    def x_addr(self, addr, *args, **kwargs):
+        """
+        Given the address of some code block, convert it to the value that should be assigned
+        to the instruction pointer register in order to execute the code in that block.
+
+        :param addr:    The address to convert.
+        :return:        The "execution" address.
+        :rtype:         int
+        """
+        return addr
+
+    def is_thumb(self, addr):  # pylint:disable=unused-argument
+        """
+        Return True, if the address is the THUMB address. False otherwise.
+
+        For non-ARM architectures this method always returns False.
+
+        :param addr:    The address to check.
+        :return:        Whether the given address is the THUMB address.
+        """
+        return False
 
     @property
     def vex_support(self):
@@ -519,8 +547,8 @@ class Arch(object):
 
         return self.ks_arch is not None
 
-    address_types = integer_types
-    function_address_types = integer_types
+    address_types = (int,)
+    function_address_types = (int,)
 
     # various names
     name = None
@@ -645,7 +673,7 @@ def register_arch(regexes, bits, endness, my_arch):
             raise ValueError('Invalid Regular Expression %s' % rx)
     #if not isinstance(my_arch,Arch):
     #    raise TypeError("Arch must be a subclass of archinfo.Arch")
-    if not isinstance(bits, integer_types):
+    if not isinstance(bits, int):
         raise TypeError("Bits must be an int")
     if endness is not None:
         if endness not in (Endness.BE, Endness.LE, Endness.ME, 'any'):
