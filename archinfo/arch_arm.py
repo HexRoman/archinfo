@@ -83,8 +83,7 @@ class ArchARM(Arch):
             l.warning("Keystone is not installed!")
             return None
         if self._ks_thumb is None:
-            mode = _keystone.KS_MODE_THUMB if thumb else _keystone.KS_MODE_ARM
-            self._ks_thumb = _keystone.Ks(self.ks_arch, self.ks_mode + _keystone.KS_MODE_THUMB)
+            self._ks_thumb = _keystone.Ks(self.ks_arch, _keystone.KS_MODE_THUMB)
         return self._ks_thumb
 
     @property
@@ -93,6 +92,47 @@ class ArchARM(Arch):
             l.warning("Unicorn is not installed!")
             return None
         return _unicorn.Uc(self.uc_arch, self.uc_mode + _unicorn.UC_MODE_THUMB)
+
+    def m_addr(self, addr, *args, **kwargs):
+        """
+        Given the address of some code block, convert it to the address where this block
+        is stored in memory. The memory address can also be referred to as the "real" address.
+
+        For ARM-architecture, the "real" address is always even (has its lowest bit clear).
+
+        :param addr:    The address to convert.
+        :return:        The "real" address in memory.
+        :rtype:         int
+        """
+        return addr & ~1
+
+    def x_addr(self, addr, thumb=None, *args, **kwargs):
+        """
+        Given the address of some code block, convert it to the value that should be assigned
+        to the instruction pointer register in order to execute the code in that block.
+
+        :param addr:    The address to convert.
+        :param thumb:   Set this parameter to True if you want to convert the address into the THUMB form.
+                        Set this parameter to False if you want to convert the address into the ARM form.
+                        Set this parameter to None (default) if you want to keep the address as is.
+        :return:        The "execution" address.
+        :rtype:         int
+        """
+        if thumb is None:
+            return addr
+        elif not thumb:
+            return addr & ~1
+        else:  # thumb
+            return addr | 1
+
+    def is_thumb(self, addr):  # pylint:disable=unused-argument
+        """
+        Return True, if the address is the THUMB address. False otherwise.
+
+        :param addr:    The address to check.
+        :return:        Whether the given address is the THUMB address.
+        """
+        return bool(addr & 1)
 
     bits = 32
     vex_arch = "VexArchARM"
@@ -116,7 +156,7 @@ class ArchARM(Arch):
     _cs_thumb = None
     if _keystone:
         ks_arch = _keystone.KS_ARCH_ARM
-        ks_mode = _keystone.KS_MODE_LITTLE_ENDIAN
+        ks_mode = _keystone.KS_MODE_ARM + _keystone.KS_MODE_LITTLE_ENDIAN
     _ks_thumb = None
     uc_arch = _unicorn.UC_ARCH_ARM if _unicorn else None
     uc_mode = _unicorn.UC_MODE_LITTLE_ENDIAN if _unicorn else None
